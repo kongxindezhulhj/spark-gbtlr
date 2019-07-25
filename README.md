@@ -87,6 +87,16 @@ def main(args: Array[String]): Unit = {
       .asInstanceOf[BinaryLogisticRegressionSummary].areaUnderROC
 
     println(s"The modelxxxxxxx's auc: ${aucx}")
+    
+    //获取预测概率值 probability[0]代表预测为0的概率 probability[1]代表预测为1的概率
+    var df=model.transform(data4(1))
+    //df.show(10)
+    df.select("age", "job", "probability", "prediction")
+      .collect()
+      .foreach {
+        case Row(age: Int, job: String, probability: Vector, prediction: Double) =>
+          println(s"($age, $job) --> prob=$probability, prediction=$prediction")
+      }
 ```
 
 
