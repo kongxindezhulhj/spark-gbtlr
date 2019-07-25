@@ -74,6 +74,19 @@ def main(args: Array[String]): Unit = {
         .asInstanceOf[BinaryLogisticRegressionSummary].areaUnderROC
     println(s"Training and evaluating cost ${(endTime - startTime) / 1000} seconds")
     println(s"The model's auc: ${auc}")
+    
+    //模型保存
+    model.save("data/bank/gbtlr_model")
+
+    //模型加载
+    println("***************load the model*******************")
+    var modelx = GBTLRClassificationModel.load("data/bank/gbtlr_model") //return a GBTLRClassificationModel instance
+    val summaryx = modelx.evaluate(data4(1))
+    println("**********************************")
+    val aucx = summaryx.binaryLogisticRegressionSummary
+      .asInstanceOf[BinaryLogisticRegressionSummary].areaUnderROC
+
+    println(s"The modelxxxxxxx's auc: ${aucx}")
 ```
 
 
