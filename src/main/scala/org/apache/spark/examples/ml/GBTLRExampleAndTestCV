@@ -1,0 +1,174 @@
+package org.apache.spark.examples.ml
+
+import org.apache.log4j.{Level, Logger}
+import org.apache.spark.ml.Pipeline
+import org.apache.spark.ml.classification.BinaryLogisticRegressionSummary
+import org.apache.spark.ml.evaluation.{BinaryClassificationEvaluator, MulticlassClassificationEvaluator}
+import org.apache.spark.ml.feature.{StringIndexer, VectorAssembler}
+import org.apache.spark.ml.gbtlr.{GBTLRClassificationModel, GBTLRClassifier}
+import org.apache.spark.ml.linalg.Vector
+import org.apache.spark.ml.tuning.{CrossValidator, ParamGridBuilder}
+import org.apache.spark.sql.{Row, SparkSession}
+
+// scalastyle:off println
+
+
+object GBTLRExampleAndTestCV {
+  def main(args: Array[String]): Unit = {
+    Logger.getLogger("org").setLevel(Level.ERROR)
+
+    val spark = SparkSession
+        .builder()
+        .master("local[2]")  //集群环境注释掉该行，且需要将后面的文件路径改成hdfs上面的路径
+        .appName("gbtlr cv example")
+        .enableHiveSupport() //支持spark SQL需要引入更多的包
+        .getOrCreate()
+
+    val startTime = System.currentTimeMillis()
+
+    val dataset = spark.read.option("header", "true").option("inferSchema", "true")
+        .option("delimiter", ";").csv("data/bank/bank-full.csv")
+
+    //将字符串转换成数字下标 ref:https://cloud.tencent.com/developer/article/1172180
+    val columnNames = Array("job", "marital", "education",
+      "default", "housing", "loan", "contact", "month", "poutcome", "y")
+    val indexers = columnNames.map(name => new StringIndexer()
+        .setInputCol(name).setOutputCol(name + "_index"))
+    val pipeline = new Pipeline().setStages(indexers)
+    val data1 = pipeline.fit(dataset).transform(dataset)
+
+    //重命名字段
+    val data2 = data1.withColumnRenamed("y_index", "label")
+
+    //将多列数据转化为单列的向量列 ref:https://blog.csdn.net/lichao_ustc/article/details/52688127
+    val assembler = new VectorAssembler()
+    assembler.setInputCols(Array("age", "job_index", "marital_index",
+      "education_index", "default_index", "balance", "housing_index",
+      "loan_index", "contact_index", "day", "month_index", "duration",
+      "campaign", "pdays", "previous", "poutcome_index"))
+    assembler.setOutputCol("features")
+
+    val data3 = assembler.transform(data2)
+
+    //将原RDD划分成两个RDD，分别作为训练集和测试集
+    val data4 = data3.randomSplit(Array(0.8, 0.2),seed = 1234L)
+
+    val gBTLRClassifier = new GBTLRClassifier()
+        .setFeaturesCol("features")
+        .setLabelCol("label")
+        .setGBTMaxIter(10)
+        .setLRMaxIter(100)
+        .setRegParam(0.01)
+        .setElasticNetParam(0.5)
+
+    //待调节的参数
+    //gbdt部分
+    /*gBTLRClassifier.maxBins
+    getMinInstancePerNode
+    minInfoGain
+    GBTMaxIter
+    stepSize
+    subsamplingRate*/
+    //lr部分
+    /*elasticNetParam
+    family="binomial"
+    fitIntercept
+    LRMaxIter
+    regParam
+    threshold
+    tol*/
+
+    /*setDefault(seed -> this.getClass.getName.hashCode.toLong,
+      subsamplingRate -> 1.0, GBTMaxIter -> 20, stepSize -> 0.1, maxDepth -> 5, maxBins -> 32,
+      minInstancesPerNode -> 1, minInfoGain -> 0.0, checkpointInterval -> 10, fitIntercept -> true,
+      probabilityCol -> "probability", rawPredictionCol -> "rawPrediction", standardization -> true,
+      threshold -> 0.5, lossType -> "logistic", cacheNodeIds -> false, maxMemoryInMB -> 256,
+      regParam -> 0.0, elasticNetParam -> 0.0, family -> "auto", LRMaxIter -> 100, tol -> 1E-6,
+      aggregationDepth -> 2, gbtGeneratedFeaturesCol -> "gbt_generated_features")*/
+
+    val pline = new Pipeline().setStages(Array(gBTLRClassifier))
+    val paramGrid = new ParamGridBuilder()
+      //.addGrid(gBTLRClassifier.GBTMaxIter, Array(50, 100,200))
+      //.addGrid(gBTLRClassifier.stepSize, Array(0.01, 0.05, 0.1))
+      //.addGrid(gBTLRClassifier.maxDepth,Array(3,7,9,12))
+      .addGrid(gBTLRClassifier.subsamplingRate,Array(0.7,0.8,0.9))
+      //.addGrid(gBTLRClassifier.LRMaxIter,Array(30, 50, 100,200))
+      .addGrid(gBTLRClassifier.elasticNetParam, Array(0,0.3,0.5,0.9,1.0))
+      .build()
+
+    /*val evaluator = new MulticlassClassificationEvaluator()
+      .setLabelCol("label")
+      .setPredictionCol("prediction")
+      .setMetricName("accuracy")*/
+
+    val cv = new CrossValidator()
+      .setEstimator(pline)
+      .setEvaluator(new BinaryClassificationEvaluator)
+      .setEstimatorParamMaps(paramGrid)
+      .setNumFolds(3) // Use 3+ in practice
+
+    val cvmodel = cv.fit(data4(0))
+
+    var df =cvmodel.transform(data4(1))
+    df.select("age", "job", "probability", "prediction")
+      .collect().take(10)
+      .foreach {
+        case Row(age: Int, job: String, probability: Vector, prediction: Double) =>
+          println(s"($age, $job) --> prob=$probability, prediction=$prediction")
+      }
+
+
+    var bestModel = cvmodel.bestModel.asInstanceOf[org.apache.spark.ml.PipelineModel]   //[GBTLRClassificationModel]
+
+    var model = bestModel.stages(0).asInstanceOf[GBTLRClassificationModel]
+
+    println(s"model.extractParamMap():"+model.extractParamMap())
+
+
+    //println("Learned classification GBT model:\n" + model.gbtModel.toDebugString)
+    //println("Learned classification LR model:\n" + model.lrModel.coefficientMatrix)
+    /*//打印部分数据，与加载后的数据预测结果比对
+    var df =model.transform(data4(1))
+    df.select("age", "job", "probability", "prediction")
+      .collect().take(10)
+      .foreach {
+        case Row(age: Int, job: String, probability: Vector, prediction: Double) =>
+          println(s"($age, $job) --> prob=$probability, prediction=$prediction")
+      }*/
+
+    val summary = model.evaluate(data4(1))
+    val endTime = System.currentTimeMillis()
+    val auc = summary.binaryLogisticRegressionSummary
+      .asInstanceOf[BinaryLogisticRegressionSummary].areaUnderROC
+
+    println(s"Training and evaluating cost ${(endTime - startTime) / 1000} seconds")
+    println(s"The model's auc: ${auc}")
+
+
+    //模型保存
+    model.write.overwrite.save("data/bank/gbtlr_model")
+
+    //模型加载
+    println("***************load the model*******************")
+    var modelx = GBTLRClassificationModel.load("data/bank/gbtlr_model") //return a GBTLRClassificationModel instance
+    val summaryx = modelx.evaluate(data4(1))
+
+    val aucx = summaryx.binaryLogisticRegressionSummary
+      .asInstanceOf[BinaryLogisticRegressionSummary].areaUnderROC
+
+    println(s"The modelxxxxxxx's auc: ${aucx}")
+
+    //获取预测概率值 probability[0]代表预测为0的概率 probability[1]代表预测为1的概率
+    var dfx=modelx.transform(data4(1))
+    //df.show(10)
+    dfx.select("age", "job", "probability", "prediction")
+      .collect().take(10)
+      .foreach {
+        case Row(age: Int, job: String, probability: Vector, prediction: Double) =>
+          println(s"($age, $job) --> prob=$probability, prediction=$prediction")
+      }
+
+  }
+}
+
+// scalastyle:on println
